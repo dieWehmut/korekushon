@@ -79,6 +79,7 @@ export default function Home({ userId, admin }: Props) {
           url: link.url,
           created_at: link.created_at,
           categoryName: catMap.get(link.category_id) ?? '未知栏目',
+          categoryId: link.category_id,
         }))
     }
   }, [])
