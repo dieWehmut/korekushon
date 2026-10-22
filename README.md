@@ -21,5 +21,9 @@ npm ci
 npm run build   # outputs dist/ (including 404.html)
 ```
 
-Supabase credentials are supplied at build time through the `VITE_SUPABASE_URL`
-and `VITE_SUPABASE_ANON_KEY` environment variables; they are not committed.
+## Data storage
+
+The app has no backend and needs no credentials. Categories, links, comments,
+favorites and the signed-in profile are stored in the browser's `localStorage`
+(see `src/localdb/store.ts`), so every visitor starts with an empty workspace and
+their changes stay on their own device.
