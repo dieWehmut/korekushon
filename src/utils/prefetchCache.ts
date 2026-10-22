@@ -1,4 +1,13 @@
-import { supabase, type Category, type Comment, type Link } from '../supabase/supabaseClient'
+import {
+	listCategories,
+	listLinks,
+	listComments,
+	listUserCollections,
+	listUserCollectionItems,
+	type Category,
+	type Comment,
+	type Link,
+} from '../localdb/store'
 
 export type UserCollection = {
 	id: number
@@ -56,24 +65,16 @@ export function getPrefetchedLinks(categoryId: number): Link[] | null {
 export async function ensurePrefetch(): Promise<PrefetchedData> {
 	if (globalCache) return globalCache
 	if (globalInFlight) return globalInFlight
-	globalInFlight = (async () => {
-		const [{ data: catData, error: catError }, { data: linkData, error: linkError }, { data: commentData, error: commentError }] = await Promise.all([
-			supabase.from('categories').select('*').order('id'),
-			supabase.from('links').select('*').order('category_id').order('id'),
-			supabase.from('comments').select('*').order('created_at'),
-		])
-		if (catError) console.error('[prefetch] categories error', catError)
-		if (linkError) console.error('[prefetch] links error', linkError)
-		if (commentError) console.error('[prefetch] comments error', commentError)
+	globalInFlight = Promise.resolve().then(() => {
 		globalCache = {
-			categories: (catData ?? []) as Category[],
-			links: (linkData ?? []) as Link[],
-			comments: (commentData ?? []) as Comment[],
+			categories: listCategories(),
+			links: listLinks(),
+			comments: listComments(),
 			fetchedAt: Date.now(),
 		}
 		globalInFlight = null
 		return globalCache
-	})()
+	})
 	return globalInFlight
 }
 
@@ -82,31 +83,12 @@ export async function ensureUserPrefetch(userId: string): Promise<PrefetchedUser
 	if (userInFlight && cachedForUserId === userId) return userInFlight
 
 	cachedForUserId = userId
-	userInFlight = (async () => {
-		const { data: userCollectionData, error: userCollectionError } = await supabase.from('user_collections').select('id,name,category_id').eq('user_id', userId)
-		if (userCollectionError) {
-			console.error('[prefetch] user collections error', userCollectionError)
-			// Don't cache partial data on error
-			userInFlight = null
-			cachedForUserId = null
-			throw userCollectionError
-		}
-
-		const collections = (userCollectionData ?? []) as UserCollection[]
-		let collectionItems: UserCollectionItem[] = []
-
-		if (collections.length > 0) {
-			const ids = collections.map((c) => c.id)
-			const { data: itemsRows, error: itemsError } = await supabase.from('user_collection_items').select('collection_id, links(*)').in('collection_id', ids)
-			if (itemsError) {
-				console.error('[prefetch] user collection items error', itemsError)
-				userInFlight = null
-				cachedForUserId = null
-				throw itemsError
-			}
-			collectionItems = (itemsRows ?? []) as UserCollectionItem[]
-		}
-
+	userInFlight = Promise.resolve().then(() => {
+		const collections = listUserCollections(userId)
+		const linksById = new Map(listLinks().map((link) => [link.id, link]))
+		const collectionItems = listUserCollectionItems(userId)
+			.map((item) => ({ collection_id: item.collection_id, links: linksById.get(item.link_id) ?? null }))
+			.filter((item) => item.links != null)
 		userCache = {
 			userCollections: collections,
 			userCollectionItems: collectionItems,
@@ -114,7 +96,7 @@ export async function ensureUserPrefetch(userId: string): Promise<PrefetchedUser
 		}
 		userInFlight = null
 		return userCache
-	})()
+	})
 	return userInFlight
 }
 

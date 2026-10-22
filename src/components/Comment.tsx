@@ -1,7 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
-import { supabase, buildCommentsFilter, isAdmin, type Comment as CommentRow } from '../supabase/supabaseClient'
+import { buildCommentsFilter, createComment, deleteComment, getUser, listCommentsFor, subscribe, type Comment as CommentRow } from '../localdb/store'
 import '../styles/Comment.css'
-import type { User } from '@supabase/supabase-js'
 
 type Props = {
 	categoryId: number | null
@@ -40,7 +39,6 @@ export default function Comment({ categoryId, linkId, userId, open = false, onCo
 	const [loading, setLoading] = useState(() => initialComments === undefined)
 
 	const filter = useMemo(() => buildCommentsFilter({ categoryId, linkId }), [categoryId, linkId])
-	const [adminEmail, setAdminEmail] = useState<string | undefined>(undefined)
 	const [currentUser, setCurrentUser] = useState<{ id: string; email?: string | null; username?: string | null } | null>(null)
 	const [replyOpen, setReplyOpen] = useState<Record<number, boolean>>({})
 	const [replyTexts, setReplyTexts] = useState<Record<number, string>>({})
@@ -48,7 +46,8 @@ export default function Comment({ categoryId, linkId, userId, open = false, onCo
 
 	const activeUserId = currentUser?.id ?? userId ?? null
 	const canReply = Boolean(activeUserId)
-	const admin = isAdmin(adminEmail)
+	// Local mode: any signed-in user can moderate their own content.
+	const admin = false
 	const commentTree = useMemo(() => buildCommentTree(comments), [comments])
 	const getTimestamp = (value?: string) => (value ? new Date(value).getTime() : Number.MAX_SAFE_INTEGER)
 
@@ -57,7 +56,11 @@ export default function Comment({ categoryId, linkId, userId, open = false, onCo
 		const list = Array.isArray(rows) ? rows : [rows]
 		if (list.length === 0) return
 		setComments(prev => {
-			const merged = [...prev, ...list]
+			// The local store notifies subscribers on every write, so the list may
+			// already contain these rows. Merge by id to avoid duplicates.
+			const byId = new Map(prev.map(row => [row.id, row]))
+			for (const row of list) byId.set(row.id, row)
+			const merged = Array.from(byId.values())
 			merged.sort((a, b) => getTimestamp(a.created_at) - getTimestamp(b.created_at))
 			onCountChange?.(merged.length)
 			return merged
@@ -67,14 +70,7 @@ export default function Comment({ categoryId, linkId, userId, open = false, onCo
 
 	const load = async (showSpinner = true) => {
 		if (showSpinner) setLoading(true)
-		let query = supabase.from('comments').select('*').order('created_at', { ascending: true })
-		if (categoryId === null) query = query.is('category_id', null)
-		else if (typeof categoryId === 'number') query = query.eq('category_id', categoryId)
-		if (linkId === null) query = query.is('link_id', null)
-		else if (typeof linkId === 'number') query = query.eq('link_id', linkId)
-		const { data, error } = await query
-		if (error) console.error(error)
-		const fetched = (data ?? []) as CommentRow[]
+		const fetched = listCommentsFor(categoryId, linkId)
 		setComments(fetched)
 		setReplyOpen({})
 		setReplyTexts({})
@@ -90,25 +86,22 @@ export default function Comment({ categoryId, linkId, userId, open = false, onCo
 			onCountChange?.(initialComments.length)
 		}
 		load(initialComments === undefined)
-		// capture current user email for admin check and cache user info
-		supabase.auth.getUser().then(({ data }: { data: { user: User | null } }) => {
-			const user = data.user
-			setAdminEmail(user?.email)
-			if (user) {
-				const meta = (user.user_metadata ?? {}) as { username?: string | null }
-				setCurrentUser({ id: user.id, email: user.email, username: meta.username ?? undefined })
-			} else {
-				setCurrentUser(null)
-			}
-		})
-		const channel = supabase
-			.channel(`comments-${filter || 'all'}`)
-			.on('postgres_changes', { event: '*', schema: 'public', table: 'comments', filter }, () => {
-				load(false)
+		getUser()
+			.then((user) => {
+				if (user) {
+					const meta = (user.user_metadata ?? {}) as { username?: string | null }
+					setCurrentUser({ id: user.id, email: user.email, username: meta.username ?? undefined })
+				} else {
+					setCurrentUser(null)
+				}
 			})
-			.subscribe()
+			.catch(() => setCurrentUser(null))
+		// Re-read the local store whenever any component writes to it.
+		const unsubscribe = subscribe(() => {
+			load(false)
+		})
 		return () => {
-			supabase.removeChannel(channel)
+			unsubscribe()
 		}
 		// eslint-disable-next-line react-hooks/exhaustive-deps
 	}, [filter])
@@ -117,13 +110,12 @@ export default function Comment({ categoryId, linkId, userId, open = false, onCo
 			if (!activeUserId) return alert('请先登录再评论')
 			const content = text.trim()
 			if (!content) return
-			const { data: ures } = await supabase.auth.getUser()
-			const user = ures.user
+			const user = await getUser()
 			if (!user) return alert('请重新登录后再试')
 			const meta = (user.user_metadata ?? {}) as { username?: string | null }
 			const author_name = meta.username ?? user.email?.split('@')[0] ?? '用户'
 			const author_email = user.email ?? null
-			const payload: Partial<CommentRow> = {
+			const inserted = createComment({
 				content,
 				category_id: categoryId,
 				link_id: linkId,
@@ -131,9 +123,7 @@ export default function Comment({ categoryId, linkId, userId, open = false, onCo
 				author_id: user.id,
 				author_name,
 				author_email,
-			}
-			const { data: inserted, error } = await supabase.from('comments').insert(payload).select().single<CommentRow>()
-			if (error) return alert(error.message)
+			})
 			setText('')
 			appendComments(inserted)
 		}
@@ -150,13 +140,12 @@ export default function Comment({ categoryId, linkId, userId, open = false, onCo
 			if (!canReply) return alert('请先登录再回复')
 			const content = (replyTexts[parent.id] ?? '').trim()
 			if (!content) return
-			const { data: ures } = await supabase.auth.getUser()
-			const user = ures.user
+			const user = await getUser()
 			if (!user) return alert('请重新登录后再试')
 			const meta = (user.user_metadata ?? {}) as { username?: string | null }
 			const author_name = meta.username ?? user.email?.split('@')[0] ?? '用户'
 			const author_email = user.email ?? null
-			const payload: Partial<CommentRow> = {
+			const inserted = createComment({
 				content,
 				category_id: parent.category_id ?? categoryId,
 				link_id: parent.link_id ?? linkId,
@@ -164,9 +153,7 @@ export default function Comment({ categoryId, linkId, userId, open = false, onCo
 				author_id: user.id,
 				author_name,
 				author_email,
-			}
-			const { data: inserted, error } = await supabase.from('comments').insert(payload).select().single<CommentRow>()
-			if (error) return alert(error.message)
+			})
 			setReplyTexts(prev => ({ ...prev, [parent.id]: '' }))
 			setReplyOpen(prev => ({ ...prev, [parent.id]: false }))
 			appendComments(inserted)
@@ -192,8 +179,7 @@ export default function Comment({ categoryId, linkId, userId, open = false, onCo
 	const del = async (id: number) => {
 		const ok = confirm('确认删除该评论？')
 		if (!ok) return
-		const { error } = await supabase.from('comments').delete().eq('id', id)
-		if (error) return alert(error.message)
+		deleteComment(id)
 		// remove from local state
 		removeFromState(id)
 	}

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import { supabase, isAdmin } from './supabase/supabaseClient'
+import { getUser, signOut, type LocalUser } from './localdb/store'
 import { clearAvatarUrl, setAvatarUrl } from './utils/theme'
 import { ensureUserPrefetch, invalidateUserPrefetch } from './utils/prefetchCache'
 import Sidebar, { COLLECTION_VIEW_ID } from './components/Sidebar'
@@ -9,7 +9,6 @@ import './styles/index.css'
 import './styles/Sidebar.css'
 import './styles/Content.css'
 import './styles/Auth.css'
-import type { AuthChangeEvent, Session } from '@supabase/supabase-js'
 import { Routes, Route, useNavigate, useLocation, useParams } from 'react-router-dom'
 
 function Footer() {
@@ -43,6 +42,11 @@ export type SessionUser = {
 	user_metadata?: { username?: string | null }
 }
 
+function toSessionUser(user: LocalUser | null): SessionUser | null {
+	if (!user) return null
+	return { id: user.id, email: user.email, user_metadata: user.user_metadata }
+}
+
 export default function App() {
 	const [user, setUser] = useState<SessionUser | null>(null)
 	const [admin, setAdmin] = useState(false)
@@ -53,25 +57,26 @@ export default function App() {
 	const location = useLocation()
 
 	useEffect(() => {
-		const handleAuthChange = async (event: AuthChangeEvent, session: Session | null) => {
-			if (event === 'PASSWORD_RECOVERY') {
-				setRecovering(true)
-				setAuthOpen(true)
-			}
+		let mounted = true
 
-			const currentUser = session?.user ?? null
-			setUser(currentUser ? { id: currentUser.id, email: currentUser.email, user_metadata: currentUser.user_metadata } : null)
-			
-			const newAdmin = currentUser ? await isAdmin(currentUser.email) : false
-			setAdmin(newAdmin)
-
-			if (currentUser) {
-				const avatarUrl = currentUser.user_metadata?.avatar_url as string | undefined
+		const applyUser = (next: SessionUser | null) => {
+			if (!mounted) return
+			setUser(next)
+			// Local mode has no server-side roles: any signed-in account is an admin.
+			setAdmin(Boolean(next))
+			if (next) {
+				const stored = localStorage.getItem('korekushon.localdb.profile')
+				let avatarUrl: string | undefined
+				try {
+					avatarUrl = stored ? (JSON.parse(stored) as { avatarUrl?: string }).avatarUrl : undefined
+				} catch {
+					avatarUrl = undefined
+				}
 				if (avatarUrl) {
 					setAvatarUrl(avatarUrl)
 					document.dispatchEvent(new CustomEvent('app:avatar-updated', { detail: { url: avatarUrl } }))
 				}
-				ensureUserPrefetch(currentUser.id).catch(err => console.error('User prefetch failed', err))
+				ensureUserPrefetch(next.id).catch(err => console.error('User prefetch failed', err))
 			} else {
 				clearAvatarUrl()
 				document.dispatchEvent(new CustomEvent('app:avatar-updated', { detail: { url: null } }))
@@ -82,14 +87,18 @@ export default function App() {
 		const openAuth = () => setAuthOpen(true)
 		document.addEventListener('app:open-auth', openAuth)
 
-		const { data: authListener } = supabase.auth.onAuthStateChange(handleAuthChange)
-
-		// Also trigger on initial load
-		supabase.auth.getSession().then(({ data: { session } }) => handleAuthChange('INITIAL_SESSION', session))
+		const refreshSession = () => {
+			getUser()
+				.then((current) => applyUser(toSessionUser(current)))
+				.catch((error) => console.error('failed to load local session', error))
+		}
+		document.addEventListener('app:session-changed', refreshSession)
+		refreshSession()
 
 		return () => {
-			authListener?.subscription.unsubscribe()
+			mounted = false
 			document.removeEventListener('app:open-auth', openAuth)
+			document.removeEventListener('app:session-changed', refreshSession)
 		}
 	}, [])
 
@@ -124,7 +133,8 @@ export default function App() {
 					{user ? (
 						<UserMenu username={username} onLogout={async () => {
 							try {
-								await supabase.auth.signOut()
+								await signOut()
+								clearAvatarUrl()
 							} catch (error) {
 								console.error('退出失败:', error)
 								alert('退出失败，请重试')
@@ -198,4 +208,3 @@ function CategoryLinksWrapper({ admin, user }: { admin: boolean; user: SessionUs
 	if (Number.isNaN(cid)) return <div className="muted">无效的栏目 ID</div>
 	return <CategoryLinks categoryId={cid} admin={admin} userId={user?.id ?? null} />
 }
-

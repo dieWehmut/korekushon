@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { supabase, type Category } from '../supabase/supabaseClient'
+import { createCategory as createCategoryRow, deleteCategory, listCategories, renameCategory as renameCategoryRow, subscribe, type Category } from '../localdb/store'
 import { ensurePrefetch, getPrefetchedData, invalidatePrefetch } from '../utils/prefetchCache'
 import { getAvatarUrl, initTheme, toggleTheme } from '../utils/theme'
 import { SETTINGS_VIEW_ID } from './Content'
@@ -36,16 +36,18 @@ export default function Sidebar({ admin, selectedId, onSelect }: SidebarProps) {
 				setAvatar(url ?? null)
 			}
 			document.addEventListener('app:avatar-updated', onAvatar)
-			return () => { mounted = false; document.removeEventListener('app:avatar-updated', onAvatar) }
+			// Keep the category list in sync with local store writes from other views.
+			const unsubscribe = subscribe(() => {
+				if (mounted) setCategories(listCategories())
+			})
+			return () => { mounted = false; document.removeEventListener('app:avatar-updated', onAvatar); unsubscribe() }
 		}, [])
 
 	const addCategory = async () => {
 		const name = prompt('新增栏目名称：')?.trim()
 		if (!name) return
-		const { data, error } = await supabase.from('categories').insert({ name }).select('*').single()
-		if (error) return alert(error.message)
-		const row = data as Category
-		setCategories((prev) => [...prev, row])
+		// The store notifies subscribers, which refreshes `categories` below.
+		createCategoryRow(name)
 		invalidatePrefetch()
 		ensurePrefetch().catch(() => undefined)
 	}
@@ -58,17 +60,14 @@ export default function Sidebar({ admin, selectedId, onSelect }: SidebarProps) {
 			if (newName === 'DELETE') {
 				const ok = confirm(`确认删除栏目「${c.name}」及其下所有内容？此操作不可撤销。`)
 				if (!ok) return
-				const { error } = await supabase.from('categories').delete().eq('id', c.id)
-				if (error) return alert(error.message)
-				setCategories((prev) => prev.filter((x) => x.id !== c.id))
+				deleteCategory(c.id)
 				invalidatePrefetch()
 				ensurePrefetch().catch(() => undefined)
 				// reset selection if needed
 				if (selectedId === c.id) onSelect(null)
 			} else if (newName && newName !== c.name) {
-				const { data, error } = await supabase.from('categories').update({ name: newName }).eq('id', c.id).select('*').single()
-				if (error) return alert(error.message)
-				setCategories((prev) => prev.map((x) => (x.id === c.id ? (data as Category) : x)))
+				const updated = renameCategoryRow(c.id, newName)
+				if (!updated) return alert('重命名失败')
 				invalidatePrefetch()
 				ensurePrefetch().catch(() => undefined)
 			}

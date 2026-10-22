@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { supabase } from '../supabase/supabaseClient'
+import { signOut } from '../localdb/store'
 import { getSavedTheme, setTheme, setAvatarUrl, clearAvatarUrl } from '../utils/theme'
 import '../styles/Settings.css'
 
@@ -9,26 +9,22 @@ type Props = {
 
 export default function Settings({ user }: Props) {
   const [loading, setLoading] = useState(false)
-  const [profileLoaded, setProfileLoaded] = useState(false)
   const [username, setUsername] = useState('')
-  const [email, setEmail] = useState('')
-  const [newPassword, setNewPassword] = useState('')
   const [avatarPreview, setAvatarPreview] = useState<string | null>(null)
   const [theme, setThemeState] = useState(getSavedTheme())
 
   useEffect(() => {
-    let mounted = true
-    ;(async () => {
-      if (!user) return
-      const { data } = await supabase.from('profiles').select('username, avatar_url').eq('id', user.id).maybeSingle()
-      if (!mounted) return
-      if (data) {
-        setUsername(data.username ?? '')
-        if (data.avatar_url) setAvatarPreview(data.avatar_url)
+    // Local mode: profile fields live in this browser only.
+    const stored = localStorage.getItem('korekushon.localdb.profile')
+    if (stored) {
+      try {
+        const parsed = JSON.parse(stored) as { username?: string; avatarUrl?: string | null }
+        if (parsed.username) setUsername(parsed.username)
+        if (parsed.avatarUrl) setAvatarPreview(parsed.avatarUrl)
+      } catch {
+        // ignore malformed profile
       }
-      setProfileLoaded(true)
-    })().catch(() => setProfileLoaded(true))
-    return () => { mounted = false }
+    }
   }, [user])
 
   // Keep local `theme` state in sync with global theme changes
@@ -48,6 +44,16 @@ export default function Settings({ user }: Props) {
     document.addEventListener('app:theme-changed', onThemeChanged as EventListener)
     return () => document.removeEventListener('app:theme-changed', onThemeChanged as EventListener)
   }, [])
+
+  const persistProfile = (patch: { username?: string; avatarUrl?: string | null }) => {
+    try {
+      const raw = localStorage.getItem('korekushon.localdb.profile')
+      const current = raw ? (JSON.parse(raw) as Record<string, unknown>) : {}
+      localStorage.setItem('korekushon.localdb.profile', JSON.stringify({ ...current, ...patch }))
+    } catch {
+      // ignore storage errors
+    }
+  }
 
   if (!user) {
     return (
@@ -69,75 +75,47 @@ export default function Settings({ user }: Props) {
     )
   }
 
-  const withBusy = async (fn: () => Promise<void>) => {
-    setLoading(true)
-    try { await fn() } finally { setLoading(false) }
+  const saveUsername = () => {
+    const u = username.trim()
+    if (!u) return alert('用户名不能为空')
+    persistProfile({ username: u })
+    document.dispatchEvent(new CustomEvent('app:username-updated', { detail: { username: u } }))
+    alert('用户名已更新')
   }
 
-  const saveUsername = () => withBusy(async () => {
-    const u = username.trim()
-    const { error } = await supabase.from('profiles').upsert({ id: user.id, username: u, email: email.trim() || null }).select('id')
-    if (error) return alert(error.message)
-    const { error: mdErr } = await supabase.auth.updateUser({ data: { username: u } })
-    if (mdErr) console.warn('update metadata error:', mdErr)
-    alert('用户名已更新')
-  })
-
-  const saveEmail = () => withBusy(async () => {
-    const e = email.trim()
-    if (!/.+@.+\..+/.test(e)) return alert('请输入有效邮箱')
-    const { error: emErr } = await supabase.auth.updateUser({ email: e })
-    if (emErr) return alert(emErr.message)
-    await supabase.from('profiles').upsert({ id: user.id, email: e }).select('id')
-    alert('邮箱更新请求已提交，请查收确认邮件')
-  })
-
-  const savePassword = () => withBusy(async () => {
-    const p = newPassword
-    if (p.length < 6) return alert('密码长度至少 6 位')
-    const { error } = await supabase.auth.updateUser({ password: p })
-    if (error) return alert(error.message)
-    setNewPassword('')
-    alert('密码已更新')
-  })
-
   const onUploadAvatar = async (file: File) => {
-    if (!user) return
-    await withBusy(async () => {
-      const ext = file.name.split('.').pop() || 'png'
-      const path = `${user.id}/${Date.now()}.${ext}`
-      const { error: upErr } = await supabase.storage.from('avatars').upload(path, file, { upsert: false, contentType: file.type })
-      if (upErr) return alert(upErr.message)
-      const { data } = supabase.storage.from('avatars').getPublicUrl(path)
-      const publicUrl = data?.publicUrl
-      if (!publicUrl) return alert('获取头像 URL 失败')
-      setAvatarPreview(publicUrl)
-      const { error } = await supabase.from('profiles').upsert({ id: user.id, avatar_url: publicUrl, email: email.trim() || null }).select('id')
-      if (error) return alert(error.message)
-      const { error: mdErr } = await supabase.auth.updateUser({ data: { avatar_url: publicUrl } })
-      if (mdErr) console.warn('update metadata error:', mdErr)
-      // update sidebar avatar immediately
-      setAvatarUrl(publicUrl)
-      document.dispatchEvent(new CustomEvent('app:avatar-updated', { detail: { url: publicUrl } }))
-      alert('头像已上传并设置')
-    })
+    setLoading(true)
+    try {
+      const dataUrl = await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader()
+        reader.onload = () => resolve(String(reader.result))
+        reader.onerror = () => reject(reader.error ?? new Error('读取图片失败'))
+        reader.readAsDataURL(file)
+      })
+      setAvatarPreview(dataUrl)
+      persistProfile({ avatarUrl: dataUrl })
+      setAvatarUrl(dataUrl)
+      document.dispatchEvent(new CustomEvent('app:avatar-updated', { detail: { url: dataUrl } }))
+    } catch (error) {
+      alert(error instanceof Error ? error.message : '头像上传失败')
+    } finally {
+      setLoading(false)
+    }
   }
 
   const logout = async () => {
-    await withBusy(async () => {
-      const { error } = await supabase.auth.signOut()
-      if (error) alert(error.message)
-      else {
-        // clear local avatar cache so sidebar falls back to default
-        clearAvatarUrl()
-      }
-    })
+    setLoading(true)
+    try {
+      await signOut()
+      clearAvatarUrl()
+    } finally {
+      setLoading(false)
+    }
   }
 
   return (
     <div className="settings-wrap">
       <h2>设置</h2>
-      {!profileLoaded && <div className="muted">加载中…</div>}
 
       {/* 1: Theme (always shown) */}
       <section>
@@ -149,7 +127,7 @@ export default function Settings({ user }: Props) {
         </div>
       </section>
 
-      {/* 2: Avatar (left) + Username/Email (right) in the same card */}
+      {/* 2: Avatar (left) + Username (right) in the same card */}
       <section className="profile-card">
         <div className="avatar-row">
           <div className="avatar-preview">
@@ -164,31 +142,18 @@ export default function Settings({ user }: Props) {
               <input value={username} onChange={e => setUsername(e.target.value)} placeholder="新的用户名" />
               <button onClick={saveUsername} disabled={loading}>保存</button>
             </div>
-            <div className="row">
-              <input type="email" value={email} onChange={e => setEmail(e.target.value)} placeholder="新的邮箱" autoComplete="off" />
-              <button onClick={saveEmail} disabled={loading}>保存</button>
-            </div>
             <div className="avatar-actions">
               <label className="upload-btn">
                 <input type="file" accept="image/*" onChange={e => e.target.files && e.target.files[0] && onUploadAvatar(e.target.files[0])} />
                 上传头像
               </label>
             </div>
-            
+            <div className="muted">资料仅保存在当前浏览器。</div>
           </div>
         </div>
       </section>
 
-      {/* 3: Password (email-verified flow) */}
-      <section>
-        <h3>修改密码</h3>
-        <div className="row">
-          <input type="password" value={newPassword} onChange={e => setNewPassword(e.target.value)} placeholder="新的密码（≥ 6 位）" autoComplete="new-password" />
-          <button onClick={savePassword} disabled={loading || newPassword.length < 6}>保存</button>
-        </div>
-      </section>
-
-      {/* 4: Logout button (no '账户' heading) */}
+      {/* 3: Logout button */}
       <section className="logout-card">
         <button className="danger" onClick={logout} disabled={loading}>退出登录</button>
       </section>

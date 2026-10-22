@@ -1,10 +1,9 @@
 import '../styles/Home.css'
 import { useEffect, useMemo, useState } from 'react'
-import { supabase, fetchCommentsOverview, type Comment as CommentRow } from '../supabase/supabaseClient'
+import { fetchCommentsOverview, subscribe, updateLink, type Comment as CommentRow } from '../localdb/store'
 import { addFavoriteToCollection, removeFavoriteFromCollection, fetchUserFavoritesInCategory } from '../utils/favoritesApi'
 import Comment from './Comment'
 import { ensurePrefetch, getPrefetchedData, invalidatePrefetch, type PrefetchedData } from '../utils/prefetchCache'
-import type { Category, Link } from '../supabase/supabaseClient'
 
 type Props = {
   userId: string | null
@@ -133,8 +132,7 @@ export default function Home({ userId, admin }: Props) {
 
   const addFeatured = async () => {
     if (selectedLinkId == null) return alert('请选择内容')
-    const { error } = await supabase.from('links').update({ featured: true }).eq('id', selectedLinkId)
-    if (error) return alert(error.message)
+    updateLink(selectedLinkId, { featured: true })
     setSelectedLinkId(null)
     setSelectedCategoryId(null)
     setAddFeaturedMode(false)
@@ -238,10 +236,8 @@ export default function Home({ userId, admin }: Props) {
     }
 
     // unset old featured, set new one
-    const { error: unsetError } = await supabase.from('links').update({ featured: false }).eq('id', editingFeaturedId)
-    if (unsetError) return alert(unsetError.message)
-    const { error: setError } = await supabase.from('links').update({ featured: true }).eq('id', editSelectedLinkId)
-    if (setError) return alert(setError.message)
+    updateLink(editingFeaturedId, { featured: false })
+    updateLink(editSelectedLinkId, { featured: true })
 
     setEditingFeaturedId(null)
     setEditFeaturedCategoryId(null)
@@ -264,8 +260,7 @@ export default function Home({ userId, admin }: Props) {
   const deleteFeatured = async (id: number) => {
     const ok = confirm('确认删除该精选内容？')
     if (!ok) return
-    const { error } = await supabase.from('links').update({ featured: false }).eq('id', id)
-    if (error) return alert(error.message)
+    updateLink(id, { featured: false })
     invalidatePrefetch()
     ensurePrefetch().then(data => {
       if (data) {
@@ -282,8 +277,9 @@ export default function Home({ userId, admin }: Props) {
   }
 
   useEffect(() => {
-    ensurePrefetch().catch(() => undefined)
     const load = async () => {
+      // Always re-read the local store so the home page reflects recent edits.
+      invalidatePrefetch()
       const prefData = await ensurePrefetch().catch(() => null)
       if (prefData) {
         setCategoryCount(prefData.categories.length)
@@ -292,43 +288,15 @@ export default function Home({ userId, admin }: Props) {
         setPerCategoryCounts(buildPerCategory(prefData))
         setRecentComments(buildRecent(prefData))
         setLatestLinks(buildLatest(prefData))
-      } else {
-        const { count: c1 } = await supabase.from('categories').select('*', { count: 'exact', head: true })
-        const { count: c2 } = await supabase.from('links').select('*', { count: 'exact', head: true })
-        setCategoryCount(c1 ?? 0)
-        setLinkCount(c2 ?? 0)
-        const { data: latestRaw } = await supabase
-          .from('links')
-          .select('id,title,url,category_id,created_at')
-          .order('created_at', { ascending: false })
-          .limit(10)
-        let latestList: LatestEntry[] = []
-        if (latestRaw && latestRaw.length > 0) {
-          const catIds = Array.from(new Set(latestRaw.map((item: Link) => item.category_id))).filter((id): id is number => typeof id === 'number')
-          let catMap = new Map<number, string>()
-          if (catIds.length > 0) {
-            const { data: catRows } = await supabase.from('categories').select('id,name').in('id', catIds)
-            if (catRows) {
-              catMap = new Map(catRows.map((row: Category) => [row.id, row.name]))
-            }
-          }
-          latestList = latestRaw.map((item: Link) => ({
-            id: item.id,
-            title: item.title,
-            url: item.url,
-            categoryName: catMap.get(item.category_id) ?? `栏目 #${item.category_id}`,
-            categoryId: item.category_id,
-            created_at: item.created_at ?? undefined,
-          }))
-        }
-        setLatestLinks(latestList)
       }
-      const stats = await fetchCommentsOverview()
+      const stats = fetchCommentsOverview()
       setTotalComments(stats.total)
       setPerCategoryCounts(stats.perCategory)
       setRecentComments(stats.recent as EnrichedComment[])
     }
     load()
+    const unsubscribe = subscribe(() => { load() })
+    return () => { unsubscribe() }
   }, [buildLatest, buildPerCategory, buildRecent])
 
   return (

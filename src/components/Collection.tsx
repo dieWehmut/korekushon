@@ -1,5 +1,12 @@
 import { useEffect, useMemo, useState } from 'react'
-import { supabase, type Category, type Link } from '../supabase/supabaseClient'
+import {
+  listCategories,
+  listLinks,
+  listUserCollections,
+  listUserCollectionItems,
+  type Category,
+  type Link,
+} from '../localdb/store'
 import { addFavoriteToCollection, removeFavoriteFromCollection } from '../utils/favoritesApi'
 import '../styles/Collection.css'
 import Spinner from './Spinner'
@@ -33,17 +40,13 @@ export default function Collection({ userId, onSelectCategory }: CollectionProps
     let cancelled = false
     const load = async () => {
       setLoading(true)
-      const [{ data: catRows }, userCollectionsResult, featuredResult] = await Promise.all([
-        supabase.from('categories').select('id,name').order('id'),
-        userId
-          ? supabase.from('user_collections').select('id,name,category_id').eq('user_id', userId)
-          : Promise.resolve({ data: [] as UserCollection[] }),
-  supabase.from('links').select('id,title,url,category_id,created_at,favorite_count').eq('featured', true),
-      ])
+      const catList = listCategories()
+      const userCollections = userId ? (listUserCollections(userId) as UserCollection[]) : []
+      const allLinks = listLinks()
+      const featuredRows = allLinks.filter((link) => link.featured)
 
       if (cancelled) return
 
-      const catList = (catRows ?? []) as Category[]
       setCategories(catList)
 
       setActiveCategoryId(prev => {
@@ -51,7 +54,6 @@ export default function Collection({ userId, onSelectCategory }: CollectionProps
         return catList[0]?.id ?? null
       })
 
-      const userCollections = (userCollectionsResult?.data ?? []) as UserCollection[]
       const byCategory: Record<number, UserCollection | null> = {}
       const byCollectionId = new Map<number, UserCollection>()
       userCollections.forEach((col) => {
@@ -66,14 +68,14 @@ export default function Collection({ userId, onSelectCategory }: CollectionProps
       setCollectionByCategory(byCategory)
 
       if (userCollections.length > 0) {
-        const ids = userCollections.map((c) => c.id)
-        const { data: itemsRows } = await supabase
-          .from('user_collection_items')
-          .select('collection_id, links(*)')
-          .in('collection_id', ids)
         if (!cancelled) {
           const itemsMap: Record<number, Link[]> = {}
-          const rows = (itemsRows ?? []) as Array<{ collection_id: number; links: Link | Link[] | null }>
+          const linksById = new Map(allLinks.map((link) => [link.id, link]))
+          const rows = userId
+            ? listUserCollectionItems(userId)
+                .map((item) => ({ collection_id: item.collection_id, links: linksById.get(item.link_id) ?? null }))
+                .filter((row) => row.links != null)
+            : []
           rows.forEach((row) => {
             const collection = byCollectionId.get(row.collection_id)
             if (!collection || collection.category_id == null) return
@@ -93,7 +95,6 @@ export default function Collection({ userId, onSelectCategory }: CollectionProps
         setItemsByCategory(emptyMap)
       }
 
-      const featuredRows = (featuredResult.data ?? []) as Link[]
       const featuredMap: Record<number, Link[]> = {}
       featuredRows.forEach((link) => {
         const catId = link.category_id

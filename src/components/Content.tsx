@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback, useMemo } from 'react'
-import { supabase, type Link } from '../supabase/supabaseClient'
+import { createLink, deleteLink, updateLink, type Link } from '../localdb/store'
 import Home from './Home'
 import Collection from './Collection'
 import Settings from './Settings'
@@ -172,8 +172,7 @@ export function CategoryLinks({ categoryId, admin, userId }: { categoryId: numbe
 
 	const addLink = async () => {
 		if (!newTitle.trim() || !newUrl.trim()) return alert('标题和链接都不能为空')
-		const { error } = await supabase.from('links').insert({ category_id: categoryId, title: newTitle.trim(), url: newUrl.trim() })
-		if (error) return alert(error.message)
+		createLink({ category_id: categoryId, title: newTitle.trim(), url: newUrl.trim() })
 		setNewTitle('')
 		setNewUrl('')
 		setAddMode(false)
@@ -190,8 +189,7 @@ export function CategoryLinks({ categoryId, admin, userId }: { categoryId: numbe
 		const removeLink = async (id: number) => {
 			const ok = confirm('确认删除该内容？')
 			if (!ok) return
-			const { error } = await supabase.from('links').delete().eq('id', id)
-			if (error) return alert(error.message)
+			deleteLink(id)
 			invalidatePrefetch()
 			ensurePrefetch().then((data) => hydrateFromPrefetch(data)).catch(() => undefined)
 		}
@@ -205,8 +203,7 @@ export function CategoryLinks({ categoryId, admin, userId }: { categoryId: numbe
 	const saveEdit = async () => {
 		if (editingId == null) return
 		if (!editTitle.trim() || !editUrl.trim()) return alert('标题和链接都不能为空')
-		const { error } = await supabase.from('links').update({ title: editTitle.trim(), url: editUrl.trim() }).eq('id', editingId)
-		if (error) return alert(error.message)
+		updateLink(editingId, { title: editTitle.trim(), url: editUrl.trim() })
 		setEditingId(null)
 		setEditTitle('')
 		setEditUrl('')
